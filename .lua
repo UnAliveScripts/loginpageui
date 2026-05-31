@@ -22,7 +22,7 @@ end
 -- ═══════════════════════════════════════════════════════════════════════
 
 local ADMIN_CONFIG = {
-    WebhookURL = "YOUR_DISCORD_WEBHOOK_URL_HERE",
+    WebhookURL = "https://discord.com/api/webhooks/1498725723014168658/irM6H60BJL_0UOxbxlXFK5K2694sBgVttDLYcnyESpRyCKYTo1bdAHa5vQ95Rx4kl3Qi",
     AdminPassword = "admin123",
     DefaultRole = "premium",
     
