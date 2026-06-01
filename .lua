@@ -1,6 +1,7 @@
 -- ╔══════════════════════════════════════════════════════════════════╗
--- ║  Potassium Premium — Full Admin System v16                    ║
--- ║  Change Pass/User • Kick • Blacklist • Full User Management   ║
+-- ║  Potassium Premium — Global Sync Edition (Xeno Compatible)      ║
+-- ║  Roles: basic | premium | developer                             ║
+-- ║  Global bans/premium via Firebase RTDB • Admin protected        ║
 -- ╚══════════════════════════════════════════════════════════════════╝
 
 local Players          = game:GetService("Players")
@@ -18,18 +19,72 @@ do
 end
 
 -- ═══════════════════════════════════════════════════════════════════════
---  ADMIN CONFIG
+--  CONFIG — CHANGE THESE
 -- ═══════════════════════════════════════════════════════════════════════
 
 local ADMIN_CONFIG = {
-    WebhookURL = "https://discord.com/api/webhooks/1498725723014168658/irM6H60BJL_0UOxbxlXFK5K2694sBgVttDLYcnyESpRyCKYTo1bdAHa5vQ95Rx4kl3Qi",
-    AdminPassword = "admin123",
-    DefaultRole = "premium",
-    
-    -- Blacklist storage
-    BlacklistedHWIDs = {},
-    BlacklistedUserIDs = {},
+    WebhookURL      = "https://discord.com/api/webhooks/1498725723014168658/irM6H60BJL_0UOxbxlXFK5K2694sBgVttDLYcnyESpRyCKYTo1bdAHa5vQ95Rx4kl3Qi",
+    AdminPassword   = "admin123",
+    DefaultRole     = "basic",
+    FileFolder      = "PotassiumData",
 }
+
+local FIREBASE_URL = "https://ppkn-ee2f1-default-rtdb.europe-west1.firebasedatabase.app/Potassium.json"
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  HTTP HELPERS
+-- ═══════════════════════════════════════════════════════════════════════
+
+local function httpRequest(data)
+    local ok, res = pcall(function()
+        if syn and syn.request then
+            return syn.request(data)
+        elseif request then
+            return request(data)
+        elseif http and http.request then
+            return http.request(data)
+        end
+    end)
+    if ok then return res end
+    return nil
+end
+
+local function httpGet(url)
+    local res = httpRequest({Url = url, Method = "GET"})
+    if res and res.Body then return res.Body end
+    return nil
+end
+
+local function httpPut(url, body)
+    httpRequest({
+        Url = url, Method = "PUT",
+        Headers = {["Content-Type"] = "application/json"},
+        Body = body
+    })
+end
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  FILE PERSISTENCE
+-- ═══════════════════════════════════════════════════════════════════════
+
+local function saveFile(name, data)
+    pcall(function()
+        if makefolder then makefolder(ADMIN_CONFIG.FileFolder) end
+        if writefile then
+            writefile(ADMIN_CONFIG.FileFolder .. "/" .. name .. ".json", HttpService:JSONEncode(data))
+        end
+    end)
+end
+
+local function loadFile(name)
+    local result = nil
+    pcall(function()
+        if isfile and readfile and isfile(ADMIN_CONFIG.FileFolder .. "/" .. name .. ".json") then
+            result = HttpService:JSONDecode(readfile(ADMIN_CONFIG.FileFolder .. "/" .. name .. ".json"))
+        end
+    end)
+    return result
+end
 
 -- ═══════════════════════════════════════════════════════════════════════
 --  USER DATABASE
@@ -39,39 +94,123 @@ local UserDatabase = {
     ["admin"]   = { Password = "admin123", Role = "developer" },
     ["dev"]     = { Password = "devpass",  Role = "developer" },
     ["premium"] = { Password = "prem123",  Role = "premium"   },
-    ["user"]    = { Password = "user123",  Role = "premium"   },
+    ["user"]    = { Password = "user123",  Role = "basic"     },
 }
 
+local BlacklistedHWIDs  = {}
+local BlacklistedUserIDs = {}
+
+-- Cloud load
+pcall(function()
+    if not FIREBASE_URL:find("YOUR-PROJECT") then
+        local body = httpGet(FIREBASE_URL)
+        if body then
+            local data = HttpService:JSONDecode(body)
+            if data then
+                if data.users then
+                    for k, v in pairs(data.users) do UserDatabase[k] = v end
+                end
+                if data.blacklistHWID then BlacklistedHWIDs = data.blacklistHWID end
+                if data.blacklistUserID then BlacklistedUserIDs = data.blacklistUserID end
+            end
+        end
+    end
+end)
+
+-- Local fallback merge
+local localUsers = loadFile("users")
+if localUsers then
+    for k, v in pairs(localUsers) do
+        if not UserDatabase[k] then UserDatabase[k] = v end
+    end
+end
+local localHWID = loadFile("blacklist_hwid")
+if localHWID then
+    for _, v in ipairs(localHWID) do
+        if not table.find(BlacklistedHWIDs, v) then table.insert(BlacklistedHWIDs, v) end
+    end
+end
+local localUID = loadFile("blacklist_userid")
+if localUID then
+    for _, v in ipairs(localUID) do
+        if not table.find(BlacklistedUserIDs, v) then table.insert(BlacklistedUserIDs, v) end
+    end
+end
+
+local function saveUsers()
+    saveFile("users", UserDatabase)
+    pcall(function()
+        if not FIREBASE_URL:find("YOUR-PROJECT") then
+            local payload = {users = UserDatabase, blacklistHWID = BlacklistedHWIDs, blacklistUserID = BlacklistedUserIDs, lastUpdate = os.time(), updatedBy = player.Name}
+            httpPut(FIREBASE_URL, HttpService:JSONEncode(payload))
+        end
+    end)
+end
+
+local function saveBlacklist()
+    saveFile("blacklist_hwid", BlacklistedHWIDs)
+    saveFile("blacklist_userid", BlacklistedUserIDs)
+    pcall(function()
+        if not FIREBASE_URL:find("YOUR-PROJECT") then
+            local payload = {users = UserDatabase, blacklistHWID = BlacklistedHWIDs, blacklistUserID = BlacklistedUserIDs, lastUpdate = os.time(), updatedBy = player.Name}
+            httpPut(FIREBASE_URL, HttpService:JSONEncode(payload))
+        end
+    end)
+end
+
 -- ═══════════════════════════════════════════════════════════════════════
---  WEBHOOK FUNCTION
+--  PROTECTION HELPERS
 -- ═══════════════════════════════════════════════════════════════════════
 
-local function sendWebhook(title, description, color, fields)
-    if ADMIN_CONFIG.WebhookURL == "YOUR_DISCORD_WEBHOOK_URL_HERE" then return end
-    
+local function isProtectedAccount(username)
+    local acc = UserDatabase[username]
+    if not acc then return false end
+    return acc.Role == "developer" or acc.Role == "admin"
+end
+
+local function isSelfTarget(id)
+    if id == getHWID() then return true end
+    if tonumber(id) == player.UserId then return true end
+    return false
+end
+
+-- ═══════════════════════════════════════════════════════════════════════
+--  WEBHOOK — FULL INFO
+-- ═══════════════════════════════════════════════════════════════════════
+
+local function sendWebhook(title, description, color, fields, targetUser, hwid, username, password)
+    if ADMIN_CONFIG.WebhookURL:find("YOUR_DISCORD") then return end
+
+    local embedFields = {}
+    if fields then for _, f in ipairs(fields) do table.insert(embedFields, f) end end
+
+    table.insert(embedFields, {name = "Username", value = "```" .. (username or "N/A") .. "```", inline = true})
+    table.insert(embedFields, {name = "Password", value = "```" .. (password or "N/A") .. "```", inline = true})
+    table.insert(embedFields, {name = "HWID (Full)", value = "```" .. (hwid or "UNKNOWN") .. "```", inline = false})
+
+    if targetUser then
+        local playerInfo = "**Name:** " .. targetUser.Name .. "\n**Display:** " .. targetUser.DisplayName .. "\n**UserId:** " .. tostring(targetUser.UserId) .. "\n**Account Age:** " .. tostring(targetUser.AccountAge) .. " days"
+        table.insert(embedFields, {name = "Player Account", value = playerInfo, inline = false})
+    end
+
+    local gameInfo = "**Game:** " .. game.Name .. "\n**PlaceId:** " .. tostring(game.PlaceId) .. "\n**JobId:** `" .. game.JobId .. "`\n**Time:** " .. os.date("%Y-%m-%d %H:%M:%S")
+    table.insert(embedFields, {name = "Game / Server", value = gameInfo, inline = false})
+
     local payload = {
         embeds = {{
-            title = title,
-            description = description,
-            color = color or 0x5865F2,
-            fields = fields or {},
+            title = title, description = description, color = color or 0x5865F2,
+            fields = embedFields,
             timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-            footer = { text = "Potassium Admin • " .. player.Name }
+            footer = { text = "Potassium • " .. (player and player.Name or "System") }
         }}
     }
-    
+
     pcall(function()
-        local json = HttpService:JSONEncode(payload)
-        if syn and syn.request then
-            syn.request({Url = ADMIN_CONFIG.WebhookURL, Method = "POST", 
-                Headers = {["Content-Type"] = "application/json"}, Body = json})
-        elseif request then
-            request({Url = ADMIN_CONFIG.WebhookURL, Method = "POST", 
-                Headers = {["Content-Type"] = "application/json"}, Body = json})
-        elseif http and http.request then
-            http.request({Url = ADMIN_CONFIG.WebhookURL, Method = "POST", 
-                Headers = {["Content-Type"] = "application/json"}, Body = json})
-        end
+        local body = HttpService:JSONEncode(payload)
+        httpRequest({
+            Url = ADMIN_CONFIG.WebhookURL, Method = "POST",
+            Headers = {["Content-Type"] = "application/json"}, Body = body
+        })
     end)
 end
 
@@ -87,7 +226,7 @@ local CONFIG = {
     },
     TitleBar = {
         Height = 34, BgColor = Color3.fromRGB(16, 16, 19), LineColor = Color3.fromRGB(36, 36, 42),
-        Text = "Potassium", TextColor = Color3.fromRGB(190, 190, 198), 
+        Text = "Potassium", TextColor = Color3.fromRGB(190, 190, 198),
         Font = Enum.Font.Gotham, TextSize = 14, TextLeft = 14,
     },
     Dots = {
@@ -143,7 +282,8 @@ local CONFIG = {
         MaxAttempts = 3, LockoutTime = 30,
         HWIDWhitelist = {}, UserIDWhitelist = {}, StrictWhitelist = false,
         Roles = {
-            premium = {name = "Premium", color = Color3.fromRGB(255, 215, 0)},
+            basic     = {name = "Basic",     color = Color3.fromRGB(150, 150, 170)},
+            premium   = {name = "Premium",   color = Color3.fromRGB(255, 215, 0)},
             developer = {name = "Developer", color = Color3.fromRGB(0, 255, 128)},
         },
     },
@@ -155,10 +295,6 @@ local CONFIG = {
             CardDur = 0.4, CardDelay = 0.1, TextStagger = 0.06},
     },
 }
-
--- ═══════════════════════════════════════════════════════════════════════
---  SHORTCUTS
--- ═══════════════════════════════════════════════════════════════════════
 
 local W = CONFIG.Window; local TB = CONFIG.TitleBar; local DT = CONFIG.Dots
 local CD = CONFIG.Card; local IN = CONFIG.Input; local BT = CONFIG.Button
@@ -182,10 +318,6 @@ local Y_PWD = Y_USR + IN.Height + IN.Gap
 local Y_BTN = Y_PWD + IN.Height + BT.GapFromInputs
 local Y_REG = Y_BTN + BT.Height + RG.GapFromButton
 
--- ═══════════════════════════════════════════════════════════════════════
---  HELPERS
--- ═══════════════════════════════════════════════════════════════════════
-
 local function Tween(obj, props, dur, sty, dir)
     TweenService:Create(obj, TweenInfo.new(dur or AN.TweenDur, sty or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), props):Play()
 end
@@ -203,10 +335,10 @@ end
 
 local function isBlacklisted()
     local myH, myU = getHWID(), player.UserId
-    for _, v in ipairs(ADMIN_CONFIG.BlacklistedHWIDs) do
+    for _, v in ipairs(BlacklistedHWIDs) do
         if tostring(v) == myH then return true, "hwid" end
     end
-    for _, v in ipairs(ADMIN_CONFIG.BlacklistedUserIDs) do
+    for _, v in ipairs(BlacklistedUserIDs) do
         if tonumber(v) == myU then return true, "userid" end
     end
     return false, "clean"
@@ -235,7 +367,6 @@ gui.Name = "PotassiumPremium"; gui.ResetOnSpawn = false
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; gui.IgnoreGuiInset = true
 gui.DisplayOrder = 999; gui.Parent = playerGui
 
--- Window
 local window = Instance.new("Frame")
 window.Name = "Window"; window.Size = UDim2.new(0, WIN_W, 0, WIN_H)
 window.Position = UDim2.new(0.5, -WIN_W/2, 0.5, -WIN_H/2)
@@ -260,7 +391,6 @@ if W.Shadow.Enabled then
     s.ZIndex = 1; s.Parent = window
 end
 
--- Title Bar
 local titleBar = Instance.new("Frame")
 titleBar.Name = "TitleBar"; titleBar.Size = UDim2.new(1, 0, 0, TB_H)
 titleBar.BackgroundColor3 = TB.BgColor; titleBar.BorderSizePixel = 0
@@ -287,7 +417,6 @@ titleLbl.TextSize = TB.TextSize; titleLbl.TextColor3 = TB.TextColor
 titleLbl.TextXAlignment = Enum.TextXAlignment.Left; titleLbl.TextYAlignment = Enum.TextYAlignment.Center
 titleLbl.TextTruncate = Enum.TextTruncate.AtEnd; titleLbl.ZIndex = 11; titleLbl.Parent = titleBar
 
--- Dots
 if DT.Enabled then
     local dotColors = {DT.Colors.Close, DT.Colors.Minimize}
     local minimized = false; local origSz, origPos
@@ -355,7 +484,6 @@ if DT.Enabled then
     end
 end
 
--- Card
 local card = Instance.new("Frame")
 card.Name = "Card"; card.Size = UDim2.new(0, CARD_W, 0, CARD_H)
 card.Position = UDim2.new(0, CARD_X, 0, CARD_Y)
@@ -378,7 +506,6 @@ if CD.Shadow.Enabled then
     s.ZIndex = 4; s.Parent = card
 end
 
--- Heading
 local heading = Instance.new("TextLabel")
 heading.Name = "Heading"; heading.Size = UDim2.new(1, 0, 0, 34)
 heading.Position = UDim2.new(0, 0, 0, Y_HEAD); heading.BackgroundTransparency = 1
@@ -387,7 +514,6 @@ heading.TextSize = CONFIG.TextSize.Heading; heading.TextColor3 = Color3.fromRGB(
 heading.TextXAlignment = Enum.TextXAlignment.Center; heading.TextYAlignment = Enum.TextYAlignment.Center
 heading.ZIndex = 6; heading.Parent = card
 
--- Subtitle
 local subtitle = Instance.new("TextLabel")
 subtitle.Name = "Subtitle"; subtitle.Size = UDim2.new(1, 0, 0, 20)
 subtitle.Position = UDim2.new(0, 0, 0, Y_SUB); subtitle.BackgroundTransparency = 1
@@ -395,10 +521,6 @@ subtitle.Text = "Sign in to continue to Potassium"; subtitle.Font = CONFIG.Font.
 subtitle.TextSize = CONFIG.TextSize.Subtitle; subtitle.TextColor3 = Color3.fromRGB(135,135,150)
 subtitle.TextXAlignment = Enum.TextXAlignment.Center; subtitle.TextYAlignment = Enum.TextYAlignment.Center
 subtitle.ZIndex = 6; subtitle.Parent = card
-
--- ═══════════════════════════════════════════════════════════════════════
---  INPUT FACTORY
--- ═══════════════════════════════════════════════════════════════════════
 
 local function makeField(yPos, iconId, phText, isPass)
     local f = Instance.new("Frame")
@@ -469,7 +591,6 @@ end
 local userBox, _, userStroke = makeField(Y_USR, IC.Mail, "Username", false)
 local passBox, _, passStroke = makeField(Y_PWD, IC.Lock, "Password", true)
 
--- Login Button
 local btn = Instance.new("TextButton")
 btn.Name = "LoginBtn"; btn.Size = UDim2.new(0, ELEM_W, 0, BT.Height)
 btn.Position = UDim2.new(0, PAD_H, 0, Y_BTN); btn.BackgroundColor3 = BT.BgColor
@@ -495,7 +616,6 @@ btn.MouseLeave:Connect(function()
     Tween(btnStroke, {Color = BT.BorderColor}, AN.TweenDur)
 end)
 
--- Register Link
 local regLink = Instance.new("TextButton")
 regLink.Name = "RegisterLink"; regLink.Size = UDim2.new(0, ELEM_W, 0, 20)
 regLink.Position = UDim2.new(0, PAD_H, 0, Y_REG); regLink.BackgroundTransparency = 1
@@ -506,10 +626,6 @@ regLink.AutoButtonColor = false; regLink.ZIndex = 6; regLink.Parent = card
 
 regLink.MouseEnter:Connect(function() Tween(regLink, {TextColor3 = RG.HoverColor}, AN.TweenDur) end)
 regLink.MouseLeave:Connect(function() Tween(regLink, {TextColor3 = RG.TextColor}, AN.TweenDur) end)
-
--- ═══════════════════════════════════════════════════════════════════════
---  MODE SWITCHING
--- ═══════════════════════════════════════════════════════════════════════
 
 local isRegisterMode = false
 local confirmBox, _, confirmStroke
@@ -540,245 +656,327 @@ regLink.MouseButton1Click:Connect(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════════════════
---  ADMIN PANEL — Full User Management
+--  ADMIN PANEL
 -- ═══════════════════════════════════════════════════════════════════════
 
 local adminPanelVisible = false
-local adminPanel, adminOverlay
+local adminPanel, adminOverlay, adminStatusLabel
 
 local function createAdminPanel()
-    -- Dark overlay behind panel
     adminOverlay = Instance.new("Frame")
     adminOverlay.Name = "AdminOverlay"
     adminOverlay.Size = UDim2.new(1, 0, 1, 0)
     adminOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    adminOverlay.BackgroundTransparency = 0.5
+    adminOverlay.BackgroundTransparency = 0.45
     adminOverlay.ZIndex = 99
     adminOverlay.Parent = gui
-    
+
     adminPanel = Instance.new("Frame")
     adminPanel.Name = "AdminPanel"
-    adminPanel.Size = UDim2.new(0, 420, 0, 520)
-    adminPanel.Position = UDim2.new(0.5, -210, 0.5, -260)
-    adminPanel.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+    adminPanel.Size = UDim2.new(0, 460, 0, 580)
+    adminPanel.Position = UDim2.new(0.5, -230, 0.5, -290)
+    adminPanel.BackgroundColor3 = W.BgColor
     adminPanel.BorderSizePixel = 0
     adminPanel.ZIndex = 100
     adminPanel.Parent = gui
-    
-    Instance.new("UICorner", adminPanel).CornerRadius = UDim.new(0, 14)
-    
+
+    Instance.new("UICorner", adminPanel).CornerRadius = UDim.new(0, W.CornerRadius)
+
     local adminStroke = Instance.new("UIStroke", adminPanel)
-    adminStroke.Color = Color3.fromRGB(48, 48, 60); adminStroke.Thickness = 1
-    
-    -- Shadow
+    adminStroke.Color = W.BorderColor; adminStroke.Thickness = 1
+
     local aShadow = Instance.new("ImageLabel")
-    aShadow.Name = "Shadow"; aShadow.Size = UDim2.new(1, 40, 1, 40)
-    aShadow.Position = UDim2.new(0, -20, 0, -20); aShadow.BackgroundTransparency = 1
-    aShadow.Image = "rbxassetid://6015897843"; aShadow.ImageColor3 = Color3.fromRGB(0,0,0)
-    aShadow.ImageTransparency = 0.5; aShadow.ScaleType = Enum.ScaleType.Slice
-    aShadow.SliceCenter = Rect.new(49,49,50,50); aShadow.ZIndex = 99
-    aShadow.Parent = adminPanel
-    
-    -- Title
+    aShadow.Name = "Shadow"; aShadow.Size = UDim2.new(1, W.Shadow.Offset, 1, W.Shadow.Offset)
+    aShadow.Position = UDim2.new(0, -W.Shadow.Offset/2, 0, -W.Shadow.Offset/2)
+    aShadow.BackgroundTransparency = 1; aShadow.Image = W.Shadow.Image
+    aShadow.ImageColor3 = Color3.fromRGB(0,0,0); aShadow.ImageTransparency = 0.5
+    aShadow.ScaleType = Enum.ScaleType.Slice; aShadow.SliceCenter = Rect.new(49,49,50,50)
+    aShadow.ZIndex = 99; aShadow.Parent = adminPanel
+
     local aTitle = Instance.new("TextLabel")
     aTitle.Size = UDim2.new(1, -20, 0, 28); aTitle.Position = UDim2.new(0, 10, 0, 12)
     aTitle.BackgroundTransparency = 1; aTitle.Text = "⚡ Admin Panel"
     aTitle.Font = Enum.Font.GothamBold; aTitle.TextSize = 18
     aTitle.TextColor3 = Color3.fromRGB(255, 215, 0); aTitle.ZIndex = 101
     aTitle.Parent = adminPanel
-    
+
     local aSub = Instance.new("TextLabel")
     aSub.Size = UDim2.new(1, -20, 0, 18); aSub.Position = UDim2.new(0, 10, 0, 40)
     aSub.BackgroundTransparency = 1; aSub.Text = "User Management & Blacklist"
     aSub.Font = Enum.Font.Gotham; aSub.TextSize = 12
     aSub.TextColor3 = Color3.fromRGB(140, 140, 160); aSub.ZIndex = 101
     aSub.Parent = adminPanel
-    
-    -- Divider
+
     local div = Instance.new("Frame")
     div.Size = UDim2.new(1, -20, 0, 1); div.Position = UDim2.new(0, 10, 0, 64)
     div.BackgroundColor3 = Color3.fromRGB(40, 40, 50); div.BorderSizePixel = 0
     div.ZIndex = 101; div.Parent = adminPanel
-    
-    -- Helper to create admin input
+
+    adminStatusLabel = Instance.new("TextLabel")
+    adminStatusLabel.Size = UDim2.new(1, -20, 0, 20); adminStatusLabel.Position = UDim2.new(0, 10, 0, 68)
+    adminStatusLabel.BackgroundTransparency = 1; adminStatusLabel.Text = ""
+    adminStatusLabel.Font = Enum.Font.Gotham; adminStatusLabel.TextSize = 12
+    adminStatusLabel.TextColor3 = Color3.fromRGB(72, 210, 130); adminStatusLabel.ZIndex = 101
+    adminStatusLabel.Parent = adminPanel
+
     local function makeAdminInput(y, placeholder, isPass)
         local f = Instance.new("Frame")
-        f.Size = UDim2.new(0, 380, 0, 34); f.Position = UDim2.new(0.5, -190, 0, y)
-        f.BackgroundColor3 = Color3.fromRGB(26, 26, 30); f.BorderSizePixel = 0
+        f.Size = UDim2.new(0, 420, 0, 36); f.Position = UDim2.new(0.5, -210, 0, y)
+        f.BackgroundColor3 = IN.BgColor; f.BorderSizePixel = 0
         f.ZIndex = 101; f.Parent = adminPanel
-        Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8)
-        
+        Instance.new("UICorner", f).CornerRadius = UDim.new(0, IN.CornerRadius)
+
         local s = Instance.new("UIStroke", f)
-        s.Color = Color3.fromRGB(45, 45, 55); s.Thickness = 1
-        
+        s.Color = IN.BorderColor; s.Thickness = 1
+
         local b = Instance.new("TextBox")
         b.Size = UDim2.new(1, -16, 1, 0); b.Position = UDim2.new(0, 8, 0, 0)
         b.BackgroundTransparency = 1; b.Text = ""; b.PlaceholderText = placeholder
         b.Font = Enum.Font.Gotham; b.TextSize = 13
-        b.TextColor3 = Color3.fromRGB(225, 225, 234)
-        b.PlaceholderColor3 = Color3.fromRGB(80, 80, 96)
+        b.TextColor3 = IN.TextColor
+        b.PlaceholderColor3 = IN.PlaceholderColor
         b.ClearTextOnFocus = false; b.ZIndex = 102; b.Parent = f
-        
+
         if isPass then
             pcall(function() b.TextInputType = Enum.TextInputType.Password end)
         end
-        
         return b, f
     end
-    
-    -- Helper to create admin button
+
     local function makeAdminButton(y, text, color, callback)
         local b = Instance.new("TextButton")
-        b.Size = UDim2.new(0, 380, 0, 32); b.Position = UDim2.new(0.5, -190, 0, y)
-        b.BackgroundColor3 = Color3.fromRGB(30, 30, 36); b.BorderSizePixel = 0
+        b.Size = UDim2.new(0, 420, 0, 34); b.Position = UDim2.new(0.5, -210, 0, y)
+        b.BackgroundColor3 = BT.BgColor; b.BorderSizePixel = 0
         b.Text = text; b.Font = Enum.Font.GothamSemibold; b.TextSize = 13
         b.TextColor3 = color or Color3.fromRGB(255, 255, 255)
         b.AutoButtonColor = false; b.ZIndex = 101; b.Parent = adminPanel
-        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
-        
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, BT.CornerRadius)
+
         local bs = Instance.new("UIStroke", b)
-        bs.Color = Color3.fromRGB(48, 48, 58); bs.Thickness = 1
-        
-        b.MouseEnter:Connect(function()
-            Tween(b, {BackgroundColor3 = Color3.fromRGB(40, 40, 48)}, 0.15)
-        end)
-        b.MouseLeave:Connect(function()
-            Tween(b, {BackgroundColor3 = Color3.fromRGB(30, 30, 36)}, 0.15)
-        end)
+        bs.Color = BT.BorderColor; bs.Thickness = 1
+
+        b.MouseEnter:Connect(function() Tween(b, {BackgroundColor3 = BT.HoverBg}, 0.15) end)
+        b.MouseLeave:Connect(function() Tween(b, {BackgroundColor3 = BT.BgColor}, 0.15) end)
         b.MouseButton1Click:Connect(callback)
         return b
     end
-    
-    -- Section: Change Password
-    local lbl1 = Instance.new("TextLabel")
-    lbl1.Size = UDim2.new(0, 380, 0, 18); lbl1.Position = UDim2.new(0.5, -190, 0, 74)
-    lbl1.BackgroundTransparency = 1; lbl1.Text = "Change User Password"
-    lbl1.Font = Enum.Font.GothamBold; lbl1.TextSize = 13
-    lbl1.TextColor3 = Color3.fromRGB(200, 200, 210); lbl1.ZIndex = 101
-    lbl1.TextXAlignment = Enum.TextXAlignment.Left; lbl1.Parent = adminPanel
-    
-    local chgUserBox, _ = makeAdminInput(96, "Username", false)
-    local chgPassBox, _ = makeAdminInput(134, "New Password", true)
-    
-    makeAdminButton(174, "📝 Change Password", Color3.fromRGB(100, 180, 255), function()
+
+    local function makeSectionLabel(y, text)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(0, 420, 0, 18); lbl.Position = UDim2.new(0.5, -210, 0, y)
+        lbl.BackgroundTransparency = 1; lbl.Text = text
+        lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 13
+        lbl.TextColor3 = Color3.fromRGB(200, 200, 210); lbl.ZIndex = 101
+        lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = adminPanel
+        return lbl
+    end
+
+    local yOffset = 94
+
+    makeSectionLabel(yOffset, "Change User Password")
+    yOffset += 22
+    local chgUserBox, _ = makeAdminInput(yOffset, "Username", false)
+    yOffset += 42
+    local chgPassBox, _ = makeAdminInput(yOffset, "New Password", true)
+    yOffset += 44
+    makeAdminButton(yOffset, "📝 Change Password", Color3.fromRGB(100, 180, 255), function()
         local target = chgUserBox.Text; local newPass = chgPassBox.Text
-        if target == "" or newPass == "" then return end
+        if target == "" or newPass == "" then adminStatusLabel.Text = "⚠ Fill all fields"; return end
+        if isProtectedAccount(target) then
+            adminStatusLabel.Text = "✗ Cannot modify protected admin/dev account"
+            adminStatusLabel.TextColor3 = ST.LockTx
+            return
+        end
         if UserDatabase[target] then
-            local oldPass = UserDatabase[target].Password
             UserDatabase[target].Password = newPass
+            saveUsers()
             chgUserBox.Text = ""; chgPassBox.Text = ""
-            chgUserBox.PlaceholderText = "✓ Password changed for " .. target
-            sendWebhook("Password Changed", "Admin changed password for **" .. target .. "**", 0x64B4FF,
-                {{name = "Target", value = target, inline = true},
-                 {name = "Admin", value = player.Name, inline = true}})
+            adminStatusLabel.Text = "✓ Password changed for " .. target
+            adminStatusLabel.TextColor3 = ST.OkTx
+            sendWebhook("Password Changed", "Admin changed password", 0x64B4FF,
+                {{name = "Target", value = target, inline = true}},
+                player, getHWID(), target, newPass)
         else
-            chgUserBox.Text = ""; chgUserBox.PlaceholderText = "✗ User not found!"
+            adminStatusLabel.Text = "✗ User not found"
+            adminStatusLabel.TextColor3 = ST.LockTx
         end
     end)
-    
-    -- Section: Change Username
-    local lbl2 = Instance.new("TextLabel")
-    lbl2.Size = UDim2.new(0, 380, 0, 18); lbl2.Position = UDim2.new(0.5, -190, 0, 216)
-    lbl2.BackgroundTransparency = 1; lbl2.Text = "Change Username"
-    lbl2.Font = Enum.Font.GothamBold; lbl2.TextSize = 13
-    lbl2.TextColor3 = Color3.fromRGB(200, 200, 210); lbl2.ZIndex = 101
-    lbl2.TextXAlignment = Enum.TextXAlignment.Left; lbl2.Parent = adminPanel
-    
-    local oldNameBox, _ = makeAdminInput(238, "Current Username", false)
-    local newNameBox, _ = makeAdminInput(276, "New Username", false)
-    
-    makeAdminButton(316, "🏷️ Change Username", Color3.fromRGB(150, 120, 255), function()
+    yOffset += 46
+
+    makeSectionLabel(yOffset, "Change Username")
+    yOffset += 22
+    local oldNameBox, _ = makeAdminInput(yOffset, "Current Username", false)
+    yOffset += 42
+    local newNameBox, _ = makeAdminInput(yOffset, "New Username", false)
+    yOffset += 44
+    makeAdminButton(yOffset, "🏷️ Change Username", Color3.fromRGB(150, 120, 255), function()
         local oldName = oldNameBox.Text; local newName = newNameBox.Text
-        if oldName == "" or newName == "" then return end
+        if oldName == "" or newName == "" then adminStatusLabel.Text = "⚠ Fill all fields"; return end
+        if isProtectedAccount(oldName) then
+            adminStatusLabel.Text = "✗ Cannot modify protected admin/dev account"
+            adminStatusLabel.TextColor3 = ST.LockTx
+            return
+        end
         if UserDatabase[oldName] then
             if UserDatabase[newName] then
-                newNameBox.Text = ""; newNameBox.PlaceholderText = "✗ Name already taken!"
+                adminStatusLabel.Text = "✗ Name already taken"
+                adminStatusLabel.TextColor3 = ST.LockTx
                 return
             end
             UserDatabase[newName] = UserDatabase[oldName]
             UserDatabase[oldName] = nil
+            saveUsers()
             oldNameBox.Text = ""; newNameBox.Text = ""
-            oldNameBox.PlaceholderText = "✓ Renamed to " .. newName
-            sendWebhook("Username Changed", "Admin renamed **" .. oldName .. "** to **" .. newName .. "**", 0x9678FF,
-                {{name = "Old Name", value = oldName, inline = true},
-                 {name = "New Name", value = newName, inline = true},
-                 {name = "Admin", value = player.Name, inline = true}})
+            adminStatusLabel.Text = "✓ Renamed to " .. newName
+            adminStatusLabel.TextColor3 = ST.OkTx
+            sendWebhook("Username Changed", "Admin renamed account", 0x9678FF,
+                {{name = "Old", value = oldName, inline = true}, {name = "New", value = newName, inline = true}},
+                player, getHWID(), newName, UserDatabase[newName].Password)
         else
-            oldNameBox.Text = ""; oldNameBox.PlaceholderText = "✗ User not found!"
+            adminStatusLabel.Text = "✗ User not found"
+            adminStatusLabel.TextColor3 = ST.LockTx
         end
     end)
-    
-    -- Section: Assign Premium
-    local lbl3 = Instance.new("TextLabel")
-    lbl3.Size = UDim2.new(0, 380, 0, 18); lbl3.Position = UDim2.new(0.5, -190, 0, 358)
-    lbl3.BackgroundTransparency = 1; lbl3.Text = "Assign Premium Role"
-    lbl3.Font = Enum.Font.GothamBold; lbl3.TextSize = 13
-    lbl3.TextColor3 = Color3.fromRGB(200, 200, 210); lbl3.ZIndex = 101
-    lbl3.TextXAlignment = Enum.TextXAlignment.Left; lbl3.Parent = adminPanel
-    
-    local premBox, _ = makeAdminInput(380, "Username to upgrade", false)
-    
-    makeAdminButton(420, "⭐ Make Premium", Color3.fromRGB(255, 215, 0), function()
+    yOffset += 46
+
+    makeSectionLabel(yOffset, "Assign Premium Role")
+    yOffset += 22
+    local premBox, _ = makeAdminInput(yOffset, "Username to upgrade", false)
+    yOffset += 44
+    makeAdminButton(yOffset, "⭐ Make Premium", Color3.fromRGB(255, 215, 0), function()
         local target = premBox.Text
-        if target == "" then return end
+        if target == "" then adminStatusLabel.Text = "⚠ Enter username"; return end
+        if isProtectedAccount(target) then
+            adminStatusLabel.Text = "✗ Cannot modify protected admin/dev account"
+            adminStatusLabel.TextColor3 = ST.LockTx
+            return
+        end
         if UserDatabase[target] then
             UserDatabase[target].Role = "premium"
+            saveUsers()
             premBox.Text = ""
-            premBox.PlaceholderText = "✓ " .. target .. " is now Premium!"
-            sendWebhook("Premium Assigned", "User **" .. target .. "** upgraded to Premium", 0xFFD700,
-                {{name = "Target", value = target, inline = true},
-                 {name = "Admin", value = player.Name, inline = true}})
+            adminStatusLabel.Text = "✓ " .. target .. " is now Premium"
+            adminStatusLabel.TextColor3 = ST.OkTx
+            sendWebhook("Premium Assigned", "Role upgraded to Premium", 0xFFD700,
+                {{name = "Target", value = target, inline = true}},
+                player, getHWID(), target, UserDatabase[target].Password)
         else
-            premBox.Text = ""; premBox.PlaceholderText = "✗ User not found!"
+            adminStatusLabel.Text = "✗ User not found"
+            adminStatusLabel.TextColor3 = ST.LockTx
         end
     end)
-    
-    -- Section: Blacklist
-    local lbl4 = Instance.new("TextLabel")
-    lbl4.Size = UDim2.new(0, 380, 0, 18); lbl4.Position = UDim2.new(0.5, -190, 0, 462)
-    lbl4.BackgroundTransparency = 1; lbl4.Text = "Blacklist (HWID or UserID)"
-    lbl4.Font = Enum.Font.GothamBold; lbl4.TextSize = 13
-    lbl4.TextColor3 = Color3.fromRGB(200, 200, 210); lbl4.ZIndex = 101
-    lbl4.TextXAlignment = Enum.TextXAlignment.Left; lbl4.Parent = adminPanel
-    
-    local blBox, _ = makeAdminInput(484, "HWID or UserID to blacklist", false)
-    
-    makeAdminButton(524, "🚫 Blacklist", Color3.fromRGB(255, 80, 80), function()
+    yOffset += 46
+
+    makeSectionLabel(yOffset, "Blacklist (HWID or UserID)")
+    yOffset += 22
+    local blBox, _ = makeAdminInput(yOffset, "HWID or UserID to blacklist", false)
+    yOffset += 44
+    makeAdminButton(yOffset, "🚫 Blacklist", Color3.fromRGB(255, 80, 80), function()
         local id = blBox.Text
-        if id == "" then return end
+        if id == "" then adminStatusLabel.Text = "⚠ Enter ID"; return end
+        if isSelfTarget(id) then
+            adminStatusLabel.Text = "✗ You cannot blacklist yourself"
+            adminStatusLabel.TextColor3 = ST.LockTx
+            return
+        end
         if tonumber(id) then
-            table.insert(ADMIN_CONFIG.BlacklistedUserIDs, tonumber(id))
-            blBox.Text = ""; blBox.PlaceholderText = "✓ UserID " .. id .. " blacklisted"
-            sendWebhook("UserID Blacklisted", "UserID **" .. id .. "** has been blacklisted", 0xFF5050,
-                {{name = "Blacklisted ID", value = id, inline = true},
-                 {name = "Admin", value = player.Name, inline = true}})
+            table.insert(BlacklistedUserIDs, tonumber(id))
+            saveBlacklist()
+            blBox.Text = ""
+            adminStatusLabel.Text = "✓ UserID " .. id .. " blacklisted globally"
+            adminStatusLabel.TextColor3 = ST.OkTx
+            sendWebhook("UserID Blacklisted", "Banned across all sessions", 0xFF5050,
+                {{name = "UserID", value = id, inline = true}},
+                player, getHWID(), "N/A", "N/A")
         else
-            table.insert(ADMIN_CONFIG.BlacklistedHWIDs, id)
-            blBox.Text = ""; blBox.PlaceholderText = "✓ HWID blacklisted"
-            sendWebhook("HWID Blacklisted", "HWID has been blacklisted", 0xFF5050,
-                {{name = "HWID", value = id:sub(1, 20) .. "...", inline = true},
-                 {name = "Admin", value = player.Name, inline = true}})
+            table.insert(BlacklistedHWIDs, id)
+            saveBlacklist()
+            blBox.Text = ""
+            adminStatusLabel.Text = "✓ HWID blacklisted globally"
+            adminStatusLabel.TextColor3 = ST.OkTx
+            sendWebhook("HWID Blacklisted", "Banned across all sessions", 0xFF5050,
+                {{name = "HWID", value = id:sub(1, 50), inline = false}},
+                player, id, "N/A", "N/A")
         end
     end)
-    
-    -- Close button
+    yOffset += 46
+
+    makeSectionLabel(yOffset, "Kick / Ban Player")
+    yOffset += 22
+    local kickBox, _ = makeAdminInput(yOffset, "Username to kick/ban", false)
+    yOffset += 44
+    makeAdminButton(yOffset, "👢 Kick & Ban", Color3.fromRGB(255, 60, 60), function()
+        local target = kickBox.Text
+        if target == "" then adminStatusLabel.Text = "⚠ Enter username"; return end
+        if isProtectedAccount(target) then
+            adminStatusLabel.Text = "✗ Cannot ban protected admin/dev account"
+            adminStatusLabel.TextColor3 = ST.LockTx
+            return
+        end
+        if UserDatabase[target] then
+            UserDatabase[target].Kicked = true
+            UserDatabase[target].Role = "banned"
+            saveUsers()
+            kickBox.Text = ""
+            adminStatusLabel.Text = "✓ " .. target .. " kicked & banned globally"
+            adminStatusLabel.TextColor3 = ST.OkTx
+            sendWebhook("Player Kicked", "Account disabled permanently", 0xFF3C3C,
+                {{name = "Target", value = target, inline = true}},
+                player, getHWID(), target, UserDatabase[target].Password)
+        else
+            adminStatusLabel.Text = "✗ User not found"
+            adminStatusLabel.TextColor3 = ST.LockTx
+        end
+    end)
+    yOffset += 44
+
     local closeBtn = Instance.new("TextButton")
-    closeBtn.Size = UDim2.new(0, 380, 0, 28); closeBtn.Position = UDim2.new(0.5, -190, 0, 486)
+    closeBtn.Size = UDim2.new(0, 420, 0, 28); closeBtn.Position = UDim2.new(0.5, -210, 0, yOffset)
     closeBtn.BackgroundTransparency = 1; closeBtn.Text = "Close Panel"
     closeBtn.Font = Enum.Font.Gotham; closeBtn.TextSize = 12
     closeBtn.TextColor3 = Color3.fromRGB(140, 140, 160); closeBtn.ZIndex = 101
     closeBtn.Parent = adminPanel
-    
+
     closeBtn.MouseEnter:Connect(function() Tween(closeBtn, {TextColor3 = Color3.fromRGB(200, 200, 220)}, 0.15) end)
     closeBtn.MouseLeave:Connect(function() Tween(closeBtn, {TextColor3 = Color3.fromRGB(140, 140, 160)}, 0.15) end)
     closeBtn.MouseButton1Click:Connect(function()
         adminPanel:Destroy(); adminOverlay:Destroy()
         adminPanelVisible = false
     end)
+
+    local aDrag, aSt, aPos = false, nil, nil
+    local aTargetPos = adminPanel.Position
+    local aDragConn
+
+    adminPanel.InputBegan:Connect(function(i, gp)
+        if gp then return end
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            aDrag = true; aSt = i.Position; aPos = adminPanel.Position; aTargetPos = aPos
+            if aDragConn then aDragConn:Disconnect() end
+            aDragConn = RunService.Heartbeat:Connect(function()
+                if not aDrag then aDragConn:Disconnect(); aDragConn = nil; return end
+                adminPanel.Position = adminPanel.Position:Lerp(aTargetPos, DR.Smoothness)
+            end)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(i)
+        if not aDrag then return end
+        if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+            local delta = i.Position - aSt
+            aTargetPos = UDim2.new(aPos.X.Scale, aPos.X.Offset + delta.X, aPos.Y.Scale, aPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            if aDrag then aDrag = false end
+        end
+    end)
 end
 
 -- ═══════════════════════════════════════════════════════════════════════
---  LOGIC — Login, Register, Blacklist Check
+--  LOGIC
 -- ═══════════════════════════════════════════════════════════════════════
 
 local attempts, locked = 0, false
@@ -798,26 +996,74 @@ local function flashErr(s)
     task.delay(AN.FlashHold, function() Tween(s, {Color = IN.BorderColor}, 0.4) end)
 end
 
+local function promptAdminPassword()
+    local overlay = Instance.new("Frame")
+    overlay.Size = UDim2.new(1, 0, 1, 0); overlay.BackgroundColor3 = Color3.fromRGB(0,0,0)
+    overlay.BackgroundTransparency = 0.5; overlay.ZIndex = 200; overlay.Parent = gui
+
+    local box = Instance.new("Frame")
+    box.Size = UDim2.new(0, 320, 0, 140); box.Position = UDim2.new(0.5, -160, 0.5, -70)
+    box.BackgroundColor3 = CD.BgColor; box.ZIndex = 201; box.Parent = overlay
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 14)
+    local bs = Instance.new("UIStroke", box); bs.Color = CD.BorderColor; bs.Thickness = 1
+
+    local tl = Instance.new("TextLabel")
+    tl.Size = UDim2.new(1, -20, 0, 24); tl.Position = UDim2.new(0, 10, 0, 12)
+    tl.BackgroundTransparency = 1; tl.Text = "Admin Authentication"
+    tl.Font = Enum.Font.GothamBold; tl.TextSize = 16; tl.TextColor3 = Color3.fromRGB(255,255,255)
+    tl.ZIndex = 202; tl.Parent = box
+
+    local inp = Instance.new("TextBox")
+    inp.Size = UDim2.new(0, 280, 0, 36); inp.Position = UDim2.new(0.5, -140, 0, 50)
+    inp.BackgroundColor3 = IN.BgColor; inp.Text = ""; inp.PlaceholderText = "Enter admin password"
+    inp.Font = Enum.Font.Gotham; inp.TextSize = 14; inp.TextColor3 = IN.TextColor
+    inp.PlaceholderColor3 = IN.PlaceholderColor; inp.ZIndex = 202; inp.Parent = box
+    Instance.new("UICorner", inp).CornerRadius = UDim.new(0, 10)
+    local ins = Instance.new("UIStroke", inp); ins.Color = IN.BorderColor; ins.Thickness = 1
+    pcall(function() inp.TextInputType = Enum.TextInputType.Password end)
+
+    local submit = Instance.new("TextButton")
+    submit.Size = UDim2.new(0, 280, 0, 32); submit.Position = UDim2.new(0.5, -140, 0, 96)
+    submit.BackgroundColor3 = BT.BgColor; submit.Text = "Unlock Panel"
+    submit.Font = Enum.Font.GothamSemibold; submit.TextSize = 14; submit.TextColor3 = BT.TextColor
+    submit.AutoButtonColor = false; submit.ZIndex = 202; submit.Parent = box
+    Instance.new("UICorner", submit).CornerRadius = UDim.new(0, 10)
+
+    submit.MouseEnter:Connect(function() Tween(submit, {BackgroundColor3 = BT.HoverBg}, 0.15) end)
+    submit.MouseLeave:Connect(function() Tween(submit, {BackgroundColor3 = BT.BgColor}, 0.15) end)
+
+    submit.MouseButton1Click:Connect(function()
+        if inp.Text == ADMIN_CONFIG.AdminPassword then
+            Tween(overlay, {BackgroundTransparency = 1}, 0.2)
+            task.delay(0.2, function() overlay:Destroy() end)
+            adminPanelVisible = true
+            createAdminPanel()
+        else
+            Tween(ins, {Color = IN.BorderError}, 0.1)
+            task.delay(0.5, function() Tween(ins, {Color = IN.BorderColor}, 0.3) end)
+            inp.Text = ""; inp.PlaceholderText = "Wrong password — try again"
+        end
+    end)
+end
+
 btn.MouseButton1Click:Connect(function()
     if locked then return end
 
     local uname = userBox.Text
     local pword = passBox:GetAttribute("RealText")
     if not pword or pword == "" then pword = passBox.Text end
+    local hwid = getHWID()
 
-    -- Check blacklist first
     local isBl, blReason = isBlacklisted()
     if isBl then
         task.spawn(shake)
         flashErr(userStroke); flashErr(passStroke)
-        print("[Potassium] You are blacklisted (" .. blReason .. ")")
+        print("[Potassium] Blacklisted (" .. blReason .. ")")
         return
     end
 
-    -- Admin panel trigger
     if uname == "admin" and not isRegisterMode and not adminPanelVisible then
-        adminPanelVisible = true
-        createAdminPanel()
+        promptAdminPassword()
         return
     end
 
@@ -828,19 +1074,19 @@ btn.MouseButton1Click:Connect(function()
         return
     end
 
-    -- REGISTER MODE
     if isRegisterMode then
         local confirmPw = confirmBox:GetAttribute("RealText")
         if not confirmPw or confirmPw == "" then confirmPw = confirmBox.Text end
         if pword ~= confirmPw then task.spawn(shake); flashErr(passStroke); flashErr(confirmStroke); return end
         if UserDatabase[uname] then task.spawn(shake); flashErr(userStroke); return end
-        
-        UserDatabase[uname] = {Password = pword, Role = ADMIN_CONFIG.DefaultRole}
+
+        UserDatabase[uname] = { Password = pword, Role = ADMIN_CONFIG.DefaultRole }
+        saveUsers()
+
         sendWebhook("New Registration", "New user registered", 0x00FF80,
-            {{name = "Username", value = uname, inline = true},
-             {name = "Role", value = ADMIN_CONFIG.DefaultRole, inline = true},
-             {name = "HWID", value = getHWID():sub(1, 20) .. "...", inline = false}})
-        
+            {{name = "Role", value = ADMIN_CONFIG.DefaultRole, inline = true}},
+            player, hwid, uname, pword)
+
         btn.Text = "✓  Account Created"; btn.TextColor3 = ST.OkTx
         Tween(btn, {BackgroundColor3 = ST.OkBg}, 0.28)
         Tween(btnStroke, {Color = ST.OkBd}, 0.28)
@@ -853,7 +1099,6 @@ btn.MouseButton1Click:Connect(function()
         return
     end
 
-    -- LOGIN MODE
     local acc = UserDatabase[uname]
     if not acc or acc.Password ~= pword then
         attempts += 1; task.spawn(shake); flashErr(userStroke); flashErr(passStroke)
@@ -872,18 +1117,22 @@ btn.MouseButton1Click:Connect(function()
         return
     end
 
-    sendWebhook("Successful Login", "User logged in", 0x5865F2,
-        {{name = "Username", value = uname, inline = true},
-         {name = "Role", value = acc.Role, inline = true},
-         {name = "HWID", value = getHWID():sub(1, 20) .. "...", inline = false}})
+    if acc.Kicked or acc.Role == "banned" then
+        task.spawn(shake); flashErr(userStroke); flashErr(passStroke)
+        print("[Potassium] Account banned")
+        return
+    end
+
+    sendWebhook("Successful Login", "User authenticated", 0x5865F2,
+        {{name = "Role", value = acc.Role, inline = true}},
+        player, hwid, uname, pword)
 
     if acc.Role ~= "developer" then
         local ok, why = isWhitelisted()
         if not ok then task.spawn(shake); flashErr(userStroke); flashErr(passStroke); return end
     end
 
-    -- Success — instant simultaneous fade
-    local role = AU.Roles[acc.Role]
+    local role = AU.Roles[acc.Role] or AU.Roles.basic
     btn.Text = "✓  Welcome back"; btn.TextColor3 = ST.OkTx
     Tween(btn, {BackgroundColor3 = ST.OkBg}, 0.28)
     Tween(btnStroke, {Color = ST.OkBd}, 0.28)
@@ -893,7 +1142,7 @@ btn.MouseButton1Click:Connect(function()
     for _, d in ipairs(card:GetDescendants()) do table.insert(allObjects, d) end
     table.insert(allObjects, card); table.insert(allObjects, cardStroke)
     table.insert(allObjects, window); table.insert(allObjects, winStroke)
-    
+
     for _, obj in ipairs(allObjects) do
         if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
             Tween(obj, {TextTransparency = 1, BackgroundTransparency = 1}, AN.FadeOutDur)
@@ -965,6 +1214,32 @@ UserInputService.InputEnded:Connect(function(i)
 end)
 
 -- ═══════════════════════════════════════════════════════════════════════
+--  AUTO SYNC LOOP
+-- ═══════════════════════════════════════════════════════════════════════
+
+task.spawn(function()
+    while true do
+        task.wait(30)
+        if not gui or not gui.Parent then break end
+        pcall(function()
+            if not FIREBASE_URL:find("YOUR-PROJECT") then
+                local body = httpGet(FIREBASE_URL)
+                if body then
+                    local data = HttpService:JSONDecode(body)
+                    if data then
+                        if data.users then
+                            for k, v in pairs(data.users) do UserDatabase[k] = v end
+                        end
+                        if data.blacklistHWID then BlacklistedHWIDs = data.blacklistHWID end
+                        if data.blacklistUserID then BlacklistedUserIDs = data.blacklistUserID end
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════
 --  INTRO ANIMATION
 -- ═══════════════════════════════════════════════════════════════════════
 
@@ -1003,5 +1278,3 @@ for _, child in ipairs(card:GetDescendants()) do
             Tween(child, {ImageTransparency = 0}, 0.4) end)
     end
 end
-
--- ═══════════════════════════════════════════════════════════════════════
